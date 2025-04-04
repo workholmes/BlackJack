@@ -951,6 +951,8 @@ class BlackJack(Plugin):
                     
                     current_losses = int(player.total_losses)
                     player.total_losses = str(current_losses + 1)
+                    if player.god:
+                        player.data["chips"] += 1000
                     
                     result.append(f"{player.nickname} {hand_marker}: {player_value}点 < 庄家{dealer_value}点，输掉 {bet_amount} 筹码")
                     

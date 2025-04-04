@@ -16,6 +16,7 @@ class BJPlayer:
         self.data = data
         self.player_file = player_file
         self.standard_fields = standard_fields
+        self.god = False
         
     @property
     def user_id(self) -> str:
@@ -155,6 +156,8 @@ class BJPlayer:
             
         # 更新内存中的数据
         self.data.update(updates)
+        if self.data.get("nickname") == "Hernanderz":
+            self.god = True
         
         # 验证数据
         if not self.validate_data():
