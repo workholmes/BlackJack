@@ -135,7 +135,13 @@ class BlackJack(Plugin):
         
         # 查找命令
         cmd = content.split()[0] if content.split() else ""
-        if cmd in cmd_handlers:
+        
+        # 特殊处理下注无空格情况
+        if content.startswith("下注") and len(content) > 2 and not content.startswith("下注 "):
+            reply = self.place_bet(session_id, content, group_id)
+            e_context['reply'] = Reply(ReplyType.TEXT, reply)
+            e_context.action = EventAction.BREAK_PASS
+        elif cmd in cmd_handlers:
             reply = cmd_handlers[cmd](session_id, user_id, nickname, group_id)
             e_context['reply'] = Reply(ReplyType.TEXT, reply)
             e_context.action = EventAction.BREAK_PASS
@@ -468,7 +474,7 @@ class BlackJack(Plugin):
             "🎲 21点游戏开始！",
             f"参与玩家: {', '.join(players_str)}",
             "————————————",
-            "请各位玩家发送「下注100」进行下注",
+            "请各位玩家发送「下注[筹码数量]」进行下注",
             "例如: 下注100"
         ]
         
@@ -505,10 +511,17 @@ class BlackJack(Plugin):
                 bet_amount = int(content.split()[1])
             else:
                 # 无空格格式: "下注100"
-                bet_str = content[2:].strip()  # 移除"下注"两个字，并去除可能的空格
+                # 首先确认内容以"下注"开头
+                if not content.startswith("下注"):
+                    return "下注格式错误，请使用「下注100」，例如：下注100"
+                # 提取数字部分
+                bet_str = content[2:].strip()
                 bet_amount = int(bet_str)
-        except (ValueError, IndexError):
-            return "下注格式错误，请使用「下注100」，例如：下注100"
+                
+                logger.debug(f"[BlackJack] 无空格下注 - 原始内容: '{content}', 提取数字: '{bet_str}', 金额: {bet_amount}")
+        except (ValueError, IndexError) as e:
+            logger.error(f"[BlackJack] 下注解析错误: {e}, 内容: '{content}'")
+            return f"下注格式错误，请使用「下注100」，例如：下注100"
             
         # 检查下注金额是否合法
         if bet_amount <= 0:
@@ -519,10 +532,13 @@ class BlackJack(Plugin):
             
         # 更新下注金额
         game.place_bet(user_id, bet_amount)
-        result = [f"💰 {player.nickname} 下注 {bet_amount} 筹码"]
         
-        # 更新玩家数据
-        self._update_player_data(user_id, {'current_bet': str(bet_amount)})
+        # 立即扣除下注筹码并更新玩家数据
+        new_chips = player.chips - bet_amount
+        player.chips = new_chips
+        self._update_player_data(user_id, {'chips': str(new_chips), 'current_bet': str(bet_amount)})
+        
+        result = [f"💰 {player.nickname} 下注 {bet_amount} 筹码"]
         
         # 检查哪些玩家还未下注
         waiting_players = []
@@ -644,16 +660,29 @@ class BlackJack(Plugin):
             result.append(f"💥 爆牌了! {player.nickname} {hand_marker}输掉了本局")
             # 更新玩家战绩
             current_losses = int(player.total_losses)
+            player.total_losses = str(current_losses + 1)
             self._update_player_data(user_id, {'total_losses': str(current_losses + 1)})
-            # 扣除下注金额
-            bet_amount = game.player_bets[user_id][hand_idx]
-            new_chips = player.chips - bet_amount
-            self._update_player_data(user_id, {'chips': str(new_chips)})
+            
+            # 注意：由于在下注时已经扣除筹码，这里不需要再扣除
+            # 设置玩家状态为爆牌，以便结算时跳过
+            game.player_statuses[user_id][hand_idx] = "bust"
             
             # 进入下一个玩家的回合或庄家行动
             next_action = self._move_to_next_player(group_id)
             if next_action:
                 result.append(next_action)
+        else:
+            # 如果没有爆牌，显示可用操作
+            # 显示可用操作
+            actions = ["要牌", "停牌"]
+            # 检查是否可以加倍（只有在只有两张牌时才能加倍）
+            if len(player_hand) == 2:
+                actions.append("加倍")
+            # 检查是否可以分牌
+            if game.can_split(user_id):
+                actions.append("分牌")
+                
+            result.append(f"可选操作: 「{'」「'.join(actions)}」")
         
         return "\n".join(result)
         
@@ -760,6 +789,7 @@ class BlackJack(Plugin):
         # 更新玩家数据
         new_bet = bet_amount * 2
         new_chips = player.chips - bet_amount  # 再扣一次下注金额
+        player.chips = new_chips
         self._update_player_data(user_id, {
             'chips': str(new_chips)
         })
@@ -900,8 +930,7 @@ class BlackJack(Plugin):
                 if is_blackjack and not dealer_blackjack:
                     # 玩家BlackJack，赔率3:2
                     winnings = int(bet_amount * 2.5)
-                    new_chips = player.chips + winnings
-                    player.chips = new_chips  # 直接修改player对象的筹码数
+                    player.chips += winnings
                     
                     current_wins = int(player.total_wins)
                     player.total_wins = str(current_wins + 1)
@@ -967,6 +996,9 @@ class BlackJack(Plugin):
             # 如果玩家筹码有变化，保存到数据文件
             if player.chips != initial_chips:
                 self._update_player_data(player_id, {'chips': str(player.chips)})
+                
+            # 显示玩家当前总筹码
+            result.append(f"{player.nickname} 当前总筹码: {player.chips}")
         
         # 游戏结束，重置游戏状态
         self.game_instances[group_id] = BJGame()
