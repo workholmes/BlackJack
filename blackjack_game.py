@@ -99,23 +99,33 @@ class BJGame:
         
     def deal_initial_cards(self):
         """发初始牌"""
-        if self.game_status != "betting":
-            return False
-            
-        # 检查是否所有玩家都已下注
-        if any(bet[0] == 0 for bet in self.player_bets.values()):
-            return False
-            
-        # 发牌：每个玩家2张牌，庄家2张牌
+        # 清空所有手牌
+        self.player_hands = {}
+        self.player_bets = {}
+        self.player_statuses = {}
+        self.current_hand_idx = {}
+        self.dealer_hand = []
+        
+        # 为每个玩家发两张牌
         for player_id in self.players_order:
-            self.player_hands[player_id][0].append(self.deck.deal())
-            self.player_hands[player_id][0].append(self.deck.deal())
+            # 确保每个玩家都有初始手牌列表
+            self.player_hands[player_id] = [[]]
+            self.player_bets[player_id] = [0]
+            self.player_statuses[player_id] = ["waiting"]
+            self.current_hand_idx[player_id] = 0
             
+            # 发两张牌
+            for _ in range(2):
+                card = self.deck.deal()
+                self.player_hands[player_id][0].append(card)
+                
+        # 为庄家发两张牌（一张明牌，一张暗牌）
         self.dealer_hand.append(self.deck.deal())
         self.dealer_hand.append(self.deck.deal())
         
+        # 更新游戏状态
         self.game_status = "playing"
-        return True
+        self.current_player_idx = 0
         
     def hit(self, player_id: str) -> Tuple[bool, Optional[Card], int, bool]:
         """玩家要牌
@@ -236,24 +246,30 @@ class BJGame:
         
         # 检查状态和手牌
         if (self.player_statuses[player_id][hand_idx] != "waiting" or
-            len(self.player_hands[player_id][hand_idx]) != 2):
+            len(self.player_hands[player_id][hand_idx]) != 2):  # 只能在拿到两张牌时分牌
             return False
-            
-        # 检查两张牌是否点数相同（对子）
+        
+        # 检查两张牌的点数是否相同
         hand = self.player_hands[player_id][hand_idx]
         if hand[0].get_value() != hand[1].get_value():
             return False
             
-        # 创建新的手牌
-        new_hand = [hand.pop()]
-        self.player_hands[player_id].append(new_hand)
+        # 获取当前下注金额
+        current_bet = self.player_bets[player_id][hand_idx]
+        
+        # 创建新手牌
+        new_hand = [hand[1]]  # 将第二张牌移到新手牌
+        self.player_hands[player_id][hand_idx] = [hand[0]]  # 保留第一张牌在原手牌
         
         # 为每手牌各发一张新牌
         self.player_hands[player_id][hand_idx].append(self.deck.deal())
-        self.player_hands[player_id][-1].append(self.deck.deal())
+        new_hand.append(self.deck.deal())
         
-        # 复制下注金额
-        current_bet = self.player_bets[player_id][hand_idx]
+        # 添加新手牌
+        self.player_hands[player_id].append(new_hand)
+        
+        # 复制下注金额 - 确保正确设置下注金额到每个手牌
+        self.player_bets[player_id][hand_idx] = current_bet  # 确保原手牌下注正确
         self.player_bets[player_id].append(current_bet)
         
         # 设置状态
@@ -304,83 +320,90 @@ class BJGame:
         self._determine_winners()
         
     def _determine_winners(self):
-        """确定胜负并结算"""
-        self.game_status = "finished"
-        results = {}
-        
+        """确定赢家"""
         dealer_value = self.calculate_hand_value(self.dealer_hand)
-        dealer_busted = dealer_value > 21
         dealer_blackjack = len(self.dealer_hand) == 2 and dealer_value == 21
         
-        for player_id in self.players_order:
+        results = {}
+        for player_id in self.player_hands:
             results[player_id] = []
             
             for hand_idx, hand in enumerate(self.player_hands[player_id]):
+                status = self.player_statuses[player_id][hand_idx]
                 bet = self.player_bets[player_id][hand_idx]
-                player_value = self.calculate_hand_value(hand)
                 
-                # 玩家已经爆牌
-                if self.player_statuses[player_id][hand_idx] == "bust":
+                # 爆牌自动输
+                if status == "bust":
                     results[player_id].append({
-                        "outcome": "lose",
-                        "winnings": -bet,
-                        "blackjack": False
+                        'hand_idx': hand_idx,
+                        'result': 'lose',
+                        'message': f'已爆牌，输掉 {bet} 筹码',
+                        'win_amount': -bet
                     })
                     continue
+                    
+                player_value = self.calculate_hand_value(hand)
+                player_blackjack = len(hand) == 2 and player_value == 21
                 
-                # 检查BlackJack (只有原始手牌才能构成BlackJack)
-                is_blackjack = len(hand) == 2 and player_value == 21 and hand_idx == 0
-                
-                if is_blackjack and not dealer_blackjack:
-                    # 玩家BlackJack，庄家不是，赔率3:2
+                # 判断输赢
+                if player_blackjack and not dealer_blackjack:
+                    # 玩家BlackJack且庄家非BlackJack: 玩家胜(赔率3:2)
+                    win_amount = int(bet * 1.5)
                     results[player_id].append({
-                        "outcome": "blackjack",
-                        "winnings": int(bet * 1.5),
-                        "blackjack": True
+                        'hand_idx': hand_idx,
+                        'result': 'blackjack',
+                        'message': f'BlackJack! 赢得 {win_amount} 筹码',
+                        'win_amount': win_amount
                     })
-                elif dealer_blackjack and not is_blackjack:
-                    # 庄家BlackJack，玩家不是
+                elif dealer_blackjack and not player_blackjack:
+                    # 庄家BlackJack且玩家非BlackJack: 庄家胜
                     results[player_id].append({
-                        "outcome": "lose",
-                        "winnings": -bet,
-                        "blackjack": False
+                        'hand_idx': hand_idx,
+                        'result': 'lose',
+                        'message': f'庄家BlackJack，输掉 {bet} 筹码',
+                        'win_amount': -bet
                     })
-                elif is_blackjack and dealer_blackjack:
-                    # 双方都是BlackJack，平局
+                elif player_blackjack and dealer_blackjack:
+                    # 玩家和庄家都是BlackJack: 平局
                     results[player_id].append({
-                        "outcome": "push",
-                        "winnings": 0,
-                        "blackjack": True
+                        'hand_idx': hand_idx,
+                        'result': 'push',
+                        'message': f'双方都是BlackJack，平局，退还下注 {bet} 筹码',
+                        'win_amount': 0
                     })
-                elif dealer_busted:
-                    # 庄家爆牌，玩家胜
+                elif dealer_value > 21:
+                    # 庄家爆牌: 玩家胜
                     results[player_id].append({
-                        "outcome": "win",
-                        "winnings": bet,
-                        "blackjack": False
+                        'hand_idx': hand_idx,
+                        'result': 'win',
+                        'message': f'庄家爆牌! 赢得 {bet} 筹码',
+                        'win_amount': bet
                     })
                 elif player_value > dealer_value:
-                    # 玩家点数大于庄家，玩家胜
+                    # 玩家点数大于庄家: 玩家胜
                     results[player_id].append({
-                        "outcome": "win",
-                        "winnings": bet,
-                        "blackjack": False
+                        'hand_idx': hand_idx,
+                        'result': 'win',
+                        'message': f'{player_value}点 > 庄家{dealer_value}点，赢得 {bet} 筹码',
+                        'win_amount': bet
                     })
                 elif player_value < dealer_value:
-                    # 玩家点数小于庄家，庄家胜
+                    # 玩家点数小于庄家: 庄家胜
                     results[player_id].append({
-                        "outcome": "lose",
-                        "winnings": -bet,
-                        "blackjack": False
+                        'hand_idx': hand_idx,
+                        'result': 'lose',
+                        'message': f'{player_value}点 < 庄家{dealer_value}点，输掉 {bet} 筹码',
+                        'win_amount': -bet
                     })
                 else:
-                    # 平局
+                    # 点数相同: 平局
                     results[player_id].append({
-                        "outcome": "push",
-                        "winnings": 0,
-                        "blackjack": False
+                        'hand_idx': hand_idx,
+                        'result': 'push',
+                        'message': f'{player_value}点 = 庄家{dealer_value}点，平局，退还下注 {bet} 筹码',
+                        'win_amount': 0
                     })
-                
+                    
         return results
         
     def calculate_hand_value(self, hand: List[Card]) -> int:

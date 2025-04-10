@@ -18,7 +18,7 @@ from .blackjack_game import BJGame, Card
 @plugins.register(
     name="BlackJack",
     desc="21点赌场游戏",
-    version="0.2.0",
+    version="0.2.6",
     author="assistant",
     desire_priority=0
 )
@@ -531,8 +531,10 @@ class BlackJack(Plugin):
             return f"下注失败，您的筹码不足\n当前筹码: {player.chips}"
             
         # 更新下注金额
-        game.place_bet(user_id, bet_amount)
-        
+        success = game.place_bet(user_id, bet_amount)
+        if not success:
+            return "下注失败，请稍后再试"
+            
         # 立即扣除下注筹码并更新玩家数据
         new_chips = player.chips - bet_amount
         player.chips = new_chips
@@ -543,7 +545,7 @@ class BlackJack(Plugin):
         # 检查哪些玩家还未下注
         waiting_players = []
         for player_id in game.player_hands:
-            if game.player_bets.get(player_id, 0) == 0:
+            if sum(game.player_bets[player_id]) == 0:
                 p = self.get_player(player_id)
                 if p:
                     waiting_players.append(p.nickname)
@@ -561,7 +563,19 @@ class BlackJack(Plugin):
     def _deal_initial_cards(self, group_id):
         """发放初始牌"""
         game = self.game_instances[group_id]
+        
+        # 在发牌前，保存所有玩家的下注金额
+        player_bets = {}
+        for player_id in game.player_bets:
+            player_bets[player_id] = game.player_bets[player_id][0]
+            
+        # 发牌
         game.deal_initial_cards()
+        
+        # 还原所有玩家的下注金额
+        for player_id in player_bets:
+            if player_id in game.player_bets and len(game.player_bets[player_id]) > 0:
+                game.player_bets[player_id][0] = player_bets[player_id]
         
         # 生成游戏状态消息
         result = ["🃏 初始发牌完成", "————————————"]
@@ -612,12 +626,12 @@ class BlackJack(Plugin):
         
         return "\n".join(result)
         
-    def hit(self, user_id, group_id):
+    def hit(self, session_id, group_id):
         """玩家要牌"""
         if not group_id:
             return "21点游戏只能在群聊中进行，请在群聊中使用此指令"
             
-        player = self.get_player(user_id)
+        player = self.get_player(session_id)
         if not player:
             return "您还没有注册21点游戏，请先发送「21点注册」进行注册"
             
@@ -629,7 +643,10 @@ class BlackJack(Plugin):
         
         # 检查游戏状态
         if game.game_status != "playing":
-            return "当前不是玩家行动阶段"
+            return "现在不是要牌的时候"
+            
+        # 使用session_id作为user_id
+        user_id = session_id
             
         # 检查是否轮到该玩家
         player_ids = list(game.player_hands.keys())
@@ -640,51 +657,34 @@ class BlackJack(Plugin):
             return f"当前轮到 {current_player.nickname} 行动，请等待您的回合"
             
         # 获取当前手牌索引
-        hand_idx = game.current_hand_idx.get(user_id, 0)
-            
-        # 执行要牌操作
-        result_ok, new_card, hand_value, is_bust = game.hit(user_id)
-        if not result_ok or not new_card:
+        current_hand_idx = game.current_hand_idx[user_id]
+        
+        # 要牌
+        success, new_card, hand_value, is_bust = game.hit(user_id)
+        
+        if not success:
             return "要牌失败，请稍后再试"
-            
-        player_hand = game.player_hands[user_id][hand_idx]
         
-        # 显示手牌标识（如果玩家有多副手牌）
-        hand_marker = f"手牌{hand_idx+1} " if len(game.player_hands[user_id]) > 1 else ""
+        # 获取当前玩家的所有手牌
+        player_hands = game.player_hands[user_id]
+        current_hand = player_hands[current_hand_idx]
         
-        result = [f"🃏 {player.nickname} {hand_marker}要了一张牌: {new_card}"]
-        result.append(f"当前手牌 ({hand_value}点): {', '.join(str(card) for card in player_hand)}")
+        # 根据结果响应不同的信息
+        if is_bust:
+            # 爆牌
+            next_info = self._move_to_next_player(group_id)
+            all_hands_status = self.show_game_state(session_id, group_id)
+            
+            return f"🃏 {player.nickname} 要了一张牌，获得了 {new_card}。\n当前手牌: {', '.join(str(card) for card in current_hand)} (点数: {hand_value}).\n💥 很遗憾，爆牌了！\n\n{all_hands_status}\n\n{next_info}"
         
-        # 检查是否爆牌
-        if hand_value > 21:
-            result.append(f"💥 爆牌了! {player.nickname} {hand_marker}输掉了本局")
-            # 更新玩家战绩
-            current_losses = int(player.total_losses)
-            player.total_losses = str(current_losses + 1)
-            self._update_player_data(user_id, {'total_losses': str(current_losses + 1)})
-            
-            # 注意：由于在下注时已经扣除筹码，这里不需要再扣除
-            # 设置玩家状态为爆牌，以便结算时跳过
-            game.player_statuses[user_id][hand_idx] = "bust"
-            
-            # 进入下一个玩家的回合或庄家行动
-            next_action = self._move_to_next_player(group_id)
-            if next_action:
-                result.append(next_action)
+        elif hand_value == 21:
+            # 21点
+            return f"🃏 {player.nickname} 要了一张牌，获得了 {new_card}。\n当前手牌: {', '.join(str(card) for card in current_hand)} (点数: {hand_value}).\n🎉 恭喜！21点！"
+        
         else:
-            # 如果没有爆牌，显示可用操作
-            # 显示可用操作
-            actions = ["要牌", "停牌"]
-            # 检查是否可以加倍（只有在只有两张牌时才能加倍）
-            if len(player_hand) == 2:
-                actions.append("加倍")
-            # 检查是否可以分牌
-            if game.can_split(user_id):
-                actions.append("分牌")
-                
-            result.append(f"可选操作: 「{'」「'.join(actions)}」")
-        
-        return "\n".join(result)
+            # 普通情况
+            hand_info = f"第{current_hand_idx+1}手牌" if len(player_hands) > 1 else "手牌"
+            return f"🃏 {player.nickname} 要了一张牌，获得了 {new_card}。\n当前{hand_info}: {', '.join(str(card) for card in current_hand)} (点数: {hand_value}).\n你可以选择: 「要牌」「停牌」"
         
     def stand(self, user_id, group_id):
         """玩家停牌"""
@@ -721,15 +721,22 @@ class BlackJack(Plugin):
         if not success:
             return "停牌失败，请稍后再试"
             
-        player_hand = game.player_hands[user_id][hand_idx]
-        hand_value = game.calculate_hand_value(player_hand)
+        # 显示所有手牌状态
+        result = [f"🛑 {player.nickname} 手牌{hand_idx+1} 选择停牌"]
         
-        # 显示手牌标识（如果玩家有多副手牌）
-        hand_marker = f"手牌{hand_idx+1} " if len(game.player_hands[user_id]) > 1 else ""
-        
-        result = [f"🛑 {player.nickname} {hand_marker}选择停牌"]
-        result.append(f"最终手牌 ({hand_value}点): {', '.join(str(card) for card in player_hand)}")
-        
+        # 显示所有手牌
+        for i, hand in enumerate(game.player_hands[user_id]):
+            hand_value = game.calculate_hand_value(hand)
+            status = game.player_statuses[user_id][i]
+            
+            # 确定正确的状态文本
+            if status == "stand" or status == "bust":
+                status_text = "最终手牌"
+            else:
+                status_text = "手牌"
+                
+            result.append(f"{status_text}{i+1} ({hand_value}点): {', '.join(str(card) for card in hand)}")
+            
         # 进入下一个玩家的回合或庄家行动
         next_action = self._move_to_next_player(group_id)
         if next_action:
@@ -781,11 +788,6 @@ class BlackJack(Plugin):
         if not success or not new_card:
             return "加倍失败，请稍后再试"
             
-        player_hand = game.player_hands[user_id][hand_idx]
-        
-        # 显示手牌标识（如果玩家有多副手牌）
-        hand_marker = f"手牌{hand_idx+1} " if len(game.player_hands[user_id]) > 1 else ""
-        
         # 更新玩家数据
         new_bet = bet_amount * 2
         new_chips = player.chips - bet_amount  # 再扣一次下注金额
@@ -794,18 +796,36 @@ class BlackJack(Plugin):
             'chips': str(new_chips)
         })
         
-        result = [f"💪 {player.nickname} {hand_marker}选择加倍!"]
+        # 显示所有手牌状态
+        result = [f"💪 {player.nickname} 手牌{hand_idx+1} 选择加倍!"]
         result.append(f"下注金额增加到 {new_bet} 筹码")
         result.append(f"获得一张牌: {new_card}")
-        result.append(f"最终手牌 ({hand_value}点): {', '.join(str(card) for card in player_hand)}")
         
-        # 检查是否爆牌
-        if hand_value > 21:
-            result.append(f"💥 爆牌了! {player.nickname} {hand_marker}输掉了本局")
-            # 更新玩家战绩
+        # 显示所有手牌
+        for i, hand in enumerate(game.player_hands[user_id]):
+            hand_value = game.calculate_hand_value(hand)
+            status = game.player_statuses[user_id][i]
+            
+            # 确定正确的状态文本
+            if status == "stand" or status == "bust":
+                status_text = "最终手牌"
+            else:
+                status_text = "手牌"
+                
+            result.append(f"{status_text}{i+1} ({hand_value}点): {', '.join(str(card) for card in hand)} -{status_text}")
+            
+        # 计算实际的每手牌下注金额
+        hand_bets = [game.player_bets[user_id][i] for i in range(len(game.player_hands[user_id]))]
+        result.append(f"每手牌下注: {', '.join(str(bet) for bet in hand_bets)} 筹码")
+        result.append(f"总下注: {sum(game.player_bets[user_id])} 筹码")
+        
+        # 如果爆牌，添加提示信息并更新战绩
+        if is_bust:
+            result.append(f"💥 爆牌了! {player.nickname} 手牌{hand_idx+1} 输掉了该手牌")
+            # 更新玩家战绩（只在此处更新一次）
             current_losses = int(player.total_losses)
             self._update_player_data(user_id, {'total_losses': str(current_losses + 1)})
-            
+        
         # 进入下一个玩家的回合或庄家行动
         next_action = self._move_to_next_player(group_id)
         if next_action:
@@ -919,30 +939,35 @@ class BlackJack(Plugin):
                 # 显示手牌标识（如果玩家有多副手牌）
                 hand_marker = f"手牌{hand_idx+1} " if len(game.player_hands[player_id]) > 1 else ""
                 
-                # 玩家已经爆牌，之前已经处理，跳过
+                # 玩家已经爆牌，之前已经处理，跳过战绩更新，只显示结果
                 if game.player_statuses[player_id][hand_idx] == "bust":
                     result.append(f"{player.nickname} {hand_marker}: 已爆牌，输掉 {bet_amount} 筹码")
                     continue
                     
                 # 判断胜负
-                is_blackjack = len(hand) == 2 and player_value == 21 and hand_idx == 0
+                is_blackjack = len(hand) == 2 and player_value == 21
                 
                 if is_blackjack and not dealer_blackjack:
                     # 玩家BlackJack，赔率3:2
-                    winnings = int(bet_amount * 2.5)
-                    player.chips += winnings
+                    blackjack_bonus = int(bet_amount * 1.5)  # 确保是整数
+                    total_win = bet_amount + blackjack_bonus  # 返还原下注 + 奖金
+                    player.chips += total_win
                     
                     current_wins = int(player.total_wins)
-                    player.total_wins = str(current_wins + 1)
+                    blackjack_count = int(player.blackjack_count)
+                    self._update_player_data(player_id, {
+                        'total_wins': str(current_wins + 1),
+                        'blackjack_count': str(blackjack_count + 1)
+                    })
                     
-                    result.append(f"{player.nickname} {hand_marker}: BlackJack! 赢得 {winnings} 筹码")
+                    result.append(f"{player.nickname} {hand_marker}: BlackJack! 赢得 {blackjack_bonus} 筹码")
                     
                 elif dealer_blackjack and not is_blackjack:
                     # 庄家BlackJack，玩家输
                     # 注意：玩家的筹码在下注时已经扣除，这里不需要再扣
                     
                     current_losses = int(player.total_losses)
-                    player.total_losses = str(current_losses + 1)
+                    self._update_player_data(player_id, {'total_losses': str(current_losses + 1)})
                     
                     result.append(f"{player.nickname} {hand_marker}: 庄家BlackJack，输掉 {bet_amount} 筹码")
                     
@@ -952,7 +977,7 @@ class BlackJack(Plugin):
                     player.chips += bet_amount
                     
                     current_draws = int(player.total_draws)
-                    player.total_draws = str(current_draws + 1)
+                    self._update_player_data(player_id, {'total_draws': str(current_draws + 1)})
                     
                     result.append(f"{player.nickname} {hand_marker}: 双方都是BlackJack，平局，退还下注 {bet_amount} 筹码")
                     
@@ -961,7 +986,7 @@ class BlackJack(Plugin):
                     player.chips += (bet_amount * 2)  # 返还原下注和赢得的等额筹码
                     
                     current_wins = int(player.total_wins)
-                    player.total_wins = str(current_wins + 1)
+                    self._update_player_data(player_id, {'total_wins': str(current_wins + 1)})
                     
                     result.append(f"{player.nickname} {hand_marker}: 庄家爆牌，赢得 {bet_amount} 筹码")
                     
@@ -970,7 +995,7 @@ class BlackJack(Plugin):
                     player.chips += (bet_amount * 2)  # 返还原下注和赢得的等额筹码
                     
                     current_wins = int(player.total_wins)
-                    player.total_wins = str(current_wins + 1)
+                    self._update_player_data(player_id, {'total_wins': str(current_wins + 1)})
                     
                     result.append(f"{player.nickname} {hand_marker}: {player_value}点 > 庄家{dealer_value}点，赢得 {bet_amount} 筹码")
                     
@@ -979,7 +1004,7 @@ class BlackJack(Plugin):
                     # 注意：玩家的筹码在下注时已经扣除，这里不需要再扣
                     
                     current_losses = int(player.total_losses)
-                    player.total_losses = str(current_losses + 1)
+                    self._update_player_data(player_id, {'total_losses': str(current_losses + 1)})
                     
                     result.append(f"{player.nickname} {hand_marker}: {player_value}点 < 庄家{dealer_value}点，输掉 {bet_amount} 筹码")
                     
@@ -989,7 +1014,7 @@ class BlackJack(Plugin):
                     player.chips += bet_amount
                     
                     current_draws = int(player.total_draws)
-                    player.total_draws = str(current_draws + 1)
+                    self._update_player_data(player_id, {'total_draws': str(current_draws + 1)})
                     
                     result.append(f"{player.nickname} {hand_marker}: {player_value}点 = 庄家{dealer_value}点，平局，退还下注 {bet_amount} 筹码")
             
@@ -1001,7 +1026,7 @@ class BlackJack(Plugin):
             result.append(f"{player.nickname} 当前总筹码: {player.chips}")
         
         # 游戏结束，重置游戏状态
-        self.game_instances[group_id] = BJGame()
+        self.game_instances.pop(group_id, None)
         
         result.append("\n游戏结束，可以使用「21点准备」准备下一局游戏")
         return "\n".join(result)
@@ -1258,17 +1283,19 @@ class BlackJack(Plugin):
         # 获取当前手牌索引
         hand_idx = game.current_hand_idx[user_id]
         
-        # 检查玩家筹码是否足够进行分牌
-        current_bet = game.player_bets[user_id][hand_idx]
-        if player.chips < current_bet:
-            return f"分牌失败，您的筹码不足\n当前筹码: {player.chips}\n所需筹码: {current_bet}"
-            
         # 检查是否可以分牌
         if not game.can_split(user_id):
             hand = game.player_hands[user_id][hand_idx]
             if len(hand) != 2:
                 return "只有持有两张牌时才能分牌"
             return "分牌失败，只有点数相同的两张牌才能分牌"
+            
+        # 获取当前下注金额
+        current_bet = game.player_bets[user_id][hand_idx]
+        
+        # 检查玩家筹码是否足够进行分牌
+        if player.chips < current_bet:
+            return f"分牌失败，您的筹码不足\n当前筹码: {player.chips}\n所需筹码: {current_bet}"
             
         # 执行分牌
         success = game.split(user_id)
@@ -1277,21 +1304,166 @@ class BlackJack(Plugin):
             
         # 更新玩家数据（扣除额外的下注金额）
         new_chips = player.chips - current_bet
+        player.chips = new_chips
         self._update_player_data(user_id, {'chips': str(new_chips)})
         
-        # 获取分牌后的两手牌
-        original_hand = game.player_hands[user_id][hand_idx]
-        new_hand = game.player_hands[user_id][-1]
-        
-        # 计算点数
-        original_value = game.calculate_hand_value(original_hand)
-        new_value = game.calculate_hand_value(new_hand)
-        
+        # 显示所有分牌后的手牌
         result = [f"🃏 {player.nickname} 选择分牌!"]
-        result.append(f"手牌1 ({original_value}点): {', '.join(str(card) for card in original_hand)}")
-        result.append(f"手牌2 ({new_value}点): {', '.join(str(card) for card in new_hand)}")
-        result.append(f"每手牌下注: {current_bet} 筹码")
-        result.append(f"总下注: {current_bet * 2} 筹码")
-        result.append("\n现在请继续操作第一手牌...")
         
+        # 显示所有手牌
+        for i, hand in enumerate(game.player_hands[user_id]):
+            hand_value = game.calculate_hand_value(hand)
+            status = game.player_statuses[user_id][i]
+            bet = game.player_bets[user_id][i]
+            status_text = "最终手牌" if status == "stand" else "手牌"
+            result.append(f"{status_text}{i+1} ({hand_value}点): {', '.join(str(card) for card in hand)} -{status_text}")
+        
+        # 详细显示每手牌的下注
+        hand_bets = [f"手牌{i+1}: {game.player_bets[user_id][i]}" for i in range(len(game.player_hands[user_id]))]
+        result.append(f"下注情况: {', '.join(hand_bets)} 筹码")
+        result.append(f"总下注: {sum(game.player_bets[user_id])} 筹码")
+        
+        # 显示当前要操作的手牌
+        current_hand_idx = game.current_hand_idx[user_id]
+        current_hand = game.player_hands[user_id][current_hand_idx]
+        current_hand_value = game.calculate_hand_value(current_hand)
+        result.append(f"\n现在请继续操作手牌{current_hand_idx+1} ({current_hand_value}点): {', '.join(str(card) for card in current_hand)}")
+        
+        return "\n".join(result)
+        
+    def _settle_game(self, group_id):
+        """结算游戏"""
+        game = self.get_game(group_id)
+        if not game:
+            return "当前没有进行中的游戏。"
+        
+        result = ["游戏结束，结算结果:"]
+        dealer_hand = game.dealer_hand
+        dealer_value = game.calculate_hand_value(dealer_hand)
+        dealer_status = "爆牌" if dealer_value > 21 else f"{dealer_value}点"
+        
+        result.append(f"\n庄家手牌 ({dealer_status}): {', '.join(str(card) for card in dealer_hand)}")
+        
+        # 存储已处理过战绩统计的玩家ID，确保每个玩家只统计一次
+        processed_players = set()
+        
+        # 处理每个玩家的结果
+        for user_id in game.players_order:
+            player_data = self.get_player(user_id)
+            if not player_data:
+                continue
+            
+            nickname = player_data.nickname
+            player_hands = game.player_hands.get(user_id, [])
+            player_bets = game.player_bets.get(user_id, [])
+            player_statuses = game.player_statuses.get(user_id, [])
+            
+            player_results = []
+            total_win_amount = 0
+            has_blackjack = False
+            has_win = False
+            has_tie = False
+            has_loss = False
+            
+            # 处理每手牌的结果
+            for hand_idx, (hand, bet, status) in enumerate(zip(player_hands, player_bets, player_statuses)):
+                hand_value = game.calculate_hand_value(hand)
+                hand_info = f"第{hand_idx+1}手牌" if len(player_hands) > 1 else "手牌"
+                
+                # 计算胜负和赢得的筹码
+                if status == "bust":
+                    # 爆牌，输掉赌注
+                    hand_result = f"{hand_info} - 爆牌，输掉 {bet} 筹码"
+                    total_win_amount -= bet
+                    has_loss = True
+                elif dealer_value > 21:
+                    # 庄家爆牌，玩家赢
+                    if game.is_blackjack(hand):
+                        # 21点，赢1.5倍筹码
+                        win_amount = int(bet * 1.5)
+                        hand_result = f"{hand_info} - BlackJack！赢得 {win_amount} 筹码"
+                        has_blackjack = True
+                    else:
+                        # 普通获胜，赢1倍筹码
+                        win_amount = bet
+                        hand_result = f"{hand_info} - 庄家爆牌，赢得 {win_amount} 筹码"
+                    total_win_amount += win_amount
+                    has_win = True
+                elif hand_value > dealer_value:
+                    # 玩家点数大于庄家
+                    if game.is_blackjack(hand):
+                        # 21点，赢1.5倍筹码
+                        win_amount = int(bet * 1.5)
+                        hand_result = f"{hand_info} - BlackJack！赢得 {win_amount} 筹码"
+                        has_blackjack = True
+                    else:
+                        # 普通获胜，赢1倍筹码
+                        win_amount = bet
+                        hand_result = f"{hand_info} - 点数高于庄家，赢得 {win_amount} 筹码"
+                    total_win_amount += win_amount
+                    has_win = True
+                elif hand_value == dealer_value:
+                    # 平局，返还赌注
+                    if game.is_blackjack(hand) and not game.is_blackjack(dealer_hand):
+                        # 玩家21点，庄家非21点
+                        win_amount = int(bet * 1.5)
+                        hand_result = f"{hand_info} - BlackJack！赢得 {win_amount} 筹码"
+                        total_win_amount += win_amount
+                        has_blackjack = True
+                        has_win = True
+                    elif not game.is_blackjack(hand) and game.is_blackjack(dealer_hand):
+                        # 庄家21点，玩家非21点
+                        hand_result = f"{hand_info} - 庄家BlackJack，输掉 {bet} 筹码"
+                        total_win_amount -= bet
+                        has_loss = True
+                    else:
+                        # 真正的平局
+                        hand_result = f"{hand_info} - 平局，收回 {bet} 筹码"
+                        has_tie = True
+                else:
+                    # 玩家点数小于庄家，输掉赌注
+                    hand_result = f"{hand_info} - 点数低于庄家，输掉 {bet} 筹码"
+                    total_win_amount -= bet
+                    has_loss = True
+                
+                player_results.append(hand_result)
+                
+            # 更新玩家战绩统计（确保每种类型的结果只记录一次）
+            if user_id not in processed_players:
+                processed_players.add(user_id)
+                
+                # 更新玩家筹码
+                current_chips = int(player_data.chips)
+                new_chips = max(0, current_chips + total_win_amount)  # 确保筹码不会为负
+                
+                # 更新统计数据
+                stats_update = {'chips': str(new_chips)}
+                
+                if has_blackjack:
+                    stats_update['total_blackjacks'] = str(int(player_data.total_blackjacks) + 1)
+                    
+                if has_win:
+                    stats_update['total_wins'] = str(int(player_data.total_wins) + 1)
+                elif has_tie:
+                    stats_update['total_ties'] = str(int(player_data.total_ties) + 1)
+                elif has_loss:
+                    stats_update['total_losses'] = str(int(player_data.total_losses) + 1)
+                    
+                self._update_player_data(user_id, stats_update)
+                
+            # 添加玩家结果到消息
+            result_line = f"{nickname}: {' | '.join(player_results)}"
+            if total_win_amount > 0:
+                result_line += f", 总计: +{total_win_amount} 筹码"
+            elif total_win_amount < 0:
+                result_line += f", 总计: {total_win_amount} 筹码"
+            else:
+                result_line += ", 总计: 0 筹码"
+            
+            result.append(result_line)
+        
+        # 游戏结束，重置游戏状态
+        self.game_instances.pop(group_id, None)
+        
+        result.append("\n游戏结束，可以使用「21点准备」准备下一局游戏")
         return "\n".join(result) 

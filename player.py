@@ -19,25 +19,39 @@ class BJPlayer:
         
     @property
     def user_id(self) -> str:
-        return str(self.data.get('user_id', ''))
+        """获取玩家的用户ID"""
+        return self.data.get('user_id', '')
         
     @property
     def session_id(self) -> str:
-        return str(self.data.get('session_id', ''))
+        """获取玩家的会话ID"""
+        return self.data.get('session_id', '')
         
     @property
     def nickname(self) -> str:
-        return self.data.get('nickname', '')
+        """获取玩家昵称"""
+        return self.data.get('nickname', '未知玩家')
         
     @property
     def chips(self) -> int:
-        """获取玩家筹码数量"""
-        return int(self.data.get('chips', 0))
+        """获取玩家筹码"""
+        # 修复类型转换问题，先转为浮点数再转为整数
+        chip_value = self.data.get('chips', 0)
+        try:
+            # 先尝试直接转为整数
+            return int(chip_value)
+        except ValueError:
+            # 如果失败，说明可能是浮点数字符串，先转为浮点数再转为整数
+            try:
+                return int(float(chip_value))
+            except (ValueError, TypeError):
+                # 如果再次失败，返回默认值0
+                return 0
         
     @chips.setter
     def chips(self, value: int):
-        """设置玩家筹码数量"""
-        self.data['chips'] = str(value)
+        """设置玩家筹码"""
+        self.data['chips'] = str(int(value))
         
     @property
     def level(self) -> int:
@@ -51,11 +65,8 @@ class BJPlayer:
         
     @property
     def exp(self) -> int:
-        """获取经验值，确保返回整数"""
-        try:
-            return int(float(self.data.get('exp', '0')))
-        except (ValueError, TypeError):
-            return 0
+        """获取玩家经验值"""
+        return int(self.data.get('exp', 0))
         
     @exp.setter
     def exp(self, value: int):
@@ -67,7 +78,7 @@ class BJPlayer:
         
     @property
     def total_wins(self) -> int:
-        """获取总胜场"""
+        """获取玩家总胜场"""
         return int(self.data.get('total_wins', 0))
         
     @total_wins.setter
@@ -77,7 +88,7 @@ class BJPlayer:
         
     @property
     def total_losses(self) -> int:
-        """获取总败场"""
+        """获取玩家总败场"""
         return int(self.data.get('total_losses', 0))
         
     @total_losses.setter
@@ -87,7 +98,7 @@ class BJPlayer:
         
     @property
     def total_draws(self) -> int:
-        """获取总平局数"""
+        """获取玩家总平局"""
         return int(self.data.get('total_draws', 0))
         
     @total_draws.setter
@@ -97,7 +108,7 @@ class BJPlayer:
         
     @property
     def last_checkin(self) -> str:
-        """获取上次签到时间"""
+        """获取玩家上次签到时间"""
         return self.data.get('last_checkin', '')
         
     @last_checkin.setter
@@ -107,7 +118,7 @@ class BJPlayer:
         
     @property
     def blackjack_count(self) -> int:
-        """获取BlackJack次数"""
+        """获取玩家BlackJack次数"""
         return int(self.data.get('blackjack_count', 0))
         
     @blackjack_count.setter
@@ -118,7 +129,8 @@ class BJPlayer:
     @property
     def ready_status(self) -> bool:
         """获取玩家准备状态"""
-        return self.data.get('ready_status', 'False').lower() == 'true'
+        status = self.data.get('ready_status', 'False')
+        return status.lower() == 'true'
         
     @ready_status.setter
     def ready_status(self, value: bool):
